@@ -1699,7 +1699,7 @@ class CachedAttributeJobTests(PPGPerTest):
                 read(of),
                 ", ".join(str(x) for x in range(0, 100)))
 
-    def test_preqrequisites_end_up_on_both(self):
+    def test_preqrequisites_end_up_on_lfg(self):
         o = Dummy()
         def calc():
             return ", ".join(str(x) for x in range(0, 100))
@@ -1710,7 +1710,7 @@ class CachedAttributeJobTests(PPGPerTest):
         jobB = ppg.FileGeneratingJob(of, do_write).depends_on(job)
         job_preq= ppg.FileGeneratingJob('out/B', do_write)
         job.depends_on(job_preq)
-        self.assertTrue(job_preq in job.prerequisites)
+        self.assertFalse(job_preq in job.prerequisites)
         self.assertTrue(job_preq in job.lfg.prerequisites)
 
 
@@ -1739,7 +1739,7 @@ class CachedAttributeJobTests(PPGPerTest):
         ppg.new_pipegraph(rc_gen(), quiet=True)
         def calc2():
             return ", ".join(str(x) for x in range(0, 200))
-        job = ppg.CachedAttributeLoadingJob('out/mycalc', o, 'a', calc2)
+        job = ppg.CachedAttributeLoadingJob('out/mycalc', o, 'a', calc2) #now, jobB should be deleted...
         jobB = ppg.FileGeneratingJob(of, do_write).depends_on(job)
         ppg.run_pipegraph()
         self.assertEqual(
@@ -1849,7 +1849,7 @@ class CachedDataLoadingJobTests(PPGPerTest):
         ppg.run_pipegraph()
         self.assertFalse(os.path.exists('out/mycalc'))
 
-    def test_preqrequisites_end_up_on_both(self):
+    def test_preqrequisites_end_up_on_lfg(self):
         o = Dummy()
         def calc():
             return ", ".join(str(x) for x in range(0, 100))
@@ -1862,7 +1862,7 @@ class CachedDataLoadingJobTests(PPGPerTest):
         jobB = ppg.FileGeneratingJob(of, do_write).depends_on(job)
         job_preq= ppg.FileGeneratingJob('out/B', do_write)
         job.depends_on(job_preq)
-        self.assertTrue(job_preq in job.prerequisites)
+        self.assertFalse(job_preq in job.prerequisites)
         self.assertTrue(job_preq in job.lfg.prerequisites)
 
     def test_passing_non_function_to_calc(self):
@@ -2100,6 +2100,11 @@ class NotYetImplementedTests(unittest.TestCase):
     def test_invariant_dumping_on_failure(self):
         """When is it ok to update them?"""
         raise NotImplementedError()
+
+    def test_two_attribute_loading_jobs_sharing_lfg(self):
+        #this will probably fail because they not only share the calculating job,
+        #but also the loading job... Maybe refactor the lfg creation?
+        return NotImplementedError()
 
 
     def test_prev_dataloading_jobs_not_done_if_there_is_a_non_dataloading_job_inbetween_that_is_done(self):

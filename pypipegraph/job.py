@@ -139,6 +139,7 @@ class Job(object):
         return True
 
     def invalidated(self):
+        logger.info("%s invalidated called" % self)
         self.was_invalidated = True
         for dep in self.dependants:
             dep.invalidated()
@@ -732,7 +733,9 @@ class _LazyFileGeneratingJob(Job):
         except OSError:
             pass
         self.was_invalidated = True
-        #Job.invalidated(self) #no going back up the dependants... the cached job takes care of that
+        if (not self.data_loading_job.was_invalidated):
+            self.data_loading_job.invalidated()
+        #Job.invalidated(self) #no going back up the dependants... the dataloading job takes care of that
 
     def run(self):
         data = self.callback()
@@ -769,6 +772,12 @@ class CachedAttributeLoadingJob(AttributeLoadingJob):
     def depends_on(self, jobs):
         self.lfg.depends_on(jobs)
         return self
+        #The loading job itself should not depend on the preqs
+        #because then the preqs would even have to be loaded if 
+        #the lfg had run already in another job
+        #and dataloadingpreqs could not be unloaded right away
+        #(and anyhow, the loading job is so simple it doesn't need
+        #anything but the lfg output file
         #return Job.depends_on(self, jobs)
 
     def ignore_code_changes(self):
@@ -779,7 +788,8 @@ class CachedAttributeLoadingJob(AttributeLoadingJob):
         self.lfg = None
 
     def invalidated(self):
-        self.lfg.invalidated()
+        if not self.lfg.was_invalidated:
+            self.lfg.invalidated()
         Job.invalidated(self)
 
 class CachedDataLoadingJob(DataLoadingJob):
@@ -811,6 +821,14 @@ class CachedDataLoadingJob(DataLoadingJob):
     def depends_on(self, jobs):
         self.lfg.depends_on(jobs)
         return self
+        #The loading job itself should not depend on the preqs
+        #because then the preqs would even have to be loaded if 
+        #the lfg had run already in another job
+        #and dataloadingpreqs could not be unloaded right away
+        #Now, if you need to have a more complex loading function,
+        #that also requires further jobs being loaded (integrating, etc)
+        #either add in another DataLoadingJob dependand on this CachedDataLoadingJob
+        #or call Job.depends_on(this_job, jobs) yourself.
         #return Job.depends_on(self, jobs)
 
     def ignore_code_changes(self):
@@ -821,7 +839,8 @@ class CachedDataLoadingJob(DataLoadingJob):
         self.lfg = None
 
     def invalidated(self):
-        self.lfg.invalidated()
+        if not self.lfg.was_invalidated:
+            self.lfg.invalidated()
         Job.invalidated(self)
  
 
