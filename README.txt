@@ -3,10 +3,10 @@ pypipegraph
 
 pypipegraph is a library for constructing a workflow piece by piece and 
 executing just the parts of it that need to be (re-)done.
-It supports using multiple cores (SMP) and machines (cluster) and is
+It supports using multiple cores (SMP) and machines (cluster, alpha stage) and is
 a hybrid between a dependency tracker (think 'make') and a cluster engine.
 
-More specifically, you construct Jobs_, which encapsulate output (i.e. stuff that
+More specifically, you construct Jobs, which encapsulate output (i.e. stuff that
 needs to be done), invariants (which force re-evaluation of output jobs if 
 they change), and stuff inbetween (e.g. load data from disk).
 
@@ -171,16 +171,16 @@ Job generating jobs
 
 DependencyInjectionJob
 ________________________
-This job injects further dependencies into a job that already depends on it.
+This job injects further dependencies into jobs that already depends on it.
 
 An example: Say you want to extract the titles from a bunch of downloaded websites.
 But the websites are not defined when first creating jobs - you first have to download an overview
 page.
 So you write a job that takes all .html in a folder and combines their titles (Z).
 You also create a job that downloads the overview (A) .
-Then you write a DependencyInjectionJob C that depends on A, creates a bunch of jobs (B1...Bn) that
-download the single websites, and you make Z depend on all the Bn. Z must also depend on C, 
-so it can't run before it had the additional dependencies injected.
+Then you write a DependencyInjectionJob C (upon wich Z depends on) that depends on A, creates a bunch of jobs (B1...Bn) that
+download the single websites, and you return them. Z now also depends on B1..Bn and since Z also depended on C, 
+it could not have run before it had the additional dependencies injected.
 
 It is an error to add dependencies on a job that is not dependand on this DependencyInjectionJob.
 

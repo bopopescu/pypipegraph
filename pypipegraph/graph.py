@@ -56,6 +56,7 @@ class Pipegraph(object):
         self.quiet = quiet
         self.object_uniquifier = {} #used by util.assert_uniqueness_of_object to enforce pseudo-singletons
         self.invariant_loading_issues = {} #jobs whose invariant could not be unpickled for some reason - and the exception.
+        self._distribute_invariant_changes_count = 0
 
     def __del__(self):
         self.rc.pipegraph = None
@@ -95,6 +96,7 @@ class Pipegraph(object):
         self.load_invariant_status()
         self.distribute_invariant_changes()
         self.build_todo_list()
+        self.dump_graph()
 
         #make us some computational engines and put them to work.
         logger.info("now executing")
@@ -138,6 +140,8 @@ class Pipegraph(object):
                     if error_log.name != '/dev/null':
                         print >>sys.stderr, '\n failed job log in logs/ppg_erros'
                 raise ppg_exceptions.RuntimeError()
+            else:
+                self.cleanup_jobs_that_requested_it()
         finally:
             if not self.quiet:
                 print 'Pipegraph done. Executed %i jobs. %i failed' % (len([x for x in self.jobs.values() if x.was_run]), len([x for x in self.jobs.values() if x.failed]))
@@ -151,16 +155,25 @@ class Pipegraph(object):
 
     def connect_graph(self):
         """Convert the dependency graph in jobs into a bidirectional graph"""
+        #connect graph
         for job in self.jobs.values():
             #logger.info("X %s %s %s " % (job , job.prerequisites, job.dependants))
             for preq in job.prerequisites:
                 preq.dependants.add(job)
 
+        #inject final jobs to run after all others...
+        for job in self.jobs.values():
+            if job.is_final_job:
+                for jobB in self.jobs.values():
+                    if not jobB.is_final_job and not jobB.dependants:
+                        job.prerequisites.add(jobB)
+                        jobB.dependants.add(job)
+
     def destroy_job_connections(self):
         """Delete connections between jobs for gc purposes"""
         for job in self.jobs.values():
             job.dependants = None
-            job.prequisites = None
+            job.prerequisites= None
 
     def check_cycles(self):
         """Check whether there are any loops in the graph which prevent execution.
@@ -250,19 +263,29 @@ class Pipegraph(object):
             self.invariant_status = collections.defaultdict(bool)
 
     def dump_invariant_status(self):
-        op = open(invariant_status_filename_new, 'wb')
-        for key, value in self.invariant_status.items():
-            cPickle.dump(key, op, cPickle.HIGHEST_PROTOCOL)
-            cPickle.dump(value, op, cPickle.HIGHEST_PROTOCOL)
-        op.close()
+        finished = False
+        while not finished:
+            try:
+                op = open(invariant_status_filename_new, 'wb')
+                for key, value in self.invariant_status.items():
+                    cPickle.dump(key, op, cPickle.HIGHEST_PROTOCOL)
+                    cPickle.dump(value, op, cPickle.HIGHEST_PROTOCOL)
+                op.close()
+                finished = True
+            except KeyboardInterrupt:
+                pass
 
     def distribute_invariant_changes(self):
         """check each job for whether it's invariance has changed,
         and propagate the invalidation by calling job.invalidated()"""
-
+        self._distribute_invariant_changes_count += 1
         for job in self.jobs.values():
             if job.was_invalidated: #don't redo it just because we're calling this again after having received new jobs.
-                continue
+                if job.invalidation_count == self._distribute_invariant_changes_count:
+                    continue
+                else:
+                    job.distribute_invalidation() 
+                    job.invalidation_count = self._distribute_invariant_changes_count
             old = self.invariant_status[job.job_id]
             try:
                 inv = job.get_invariant(old)
@@ -280,11 +303,12 @@ class Pipegraph(object):
                         for line in difflib.unified_diff(old.split("\n"), inv.split("\n"), n=5):
                             logger.info(line)
                 job.invalidated(reason = 'invariant')
+                job.invalidation_count = self._distribute_invariant_changes_count
                 self.invariant_status[job.job_id] = inv # for now, it is the dependant job's job to clean up so they get reinvalidated if the executing is terminated before they are reubild (ie. filegenjobs delete their outputfiles)
 
     def build_todo_list(self):
         """Go through each job. If it needs to be done, invalidate() all dependands.
-        also requires all prequisites to require_loading
+        also requires all prerequisites to require_loading
         """
         needs_to_be_run = set()
         for job in self.jobs.values():
@@ -295,7 +319,7 @@ class Pipegraph(object):
                     needs_to_be_run.add(job.job_id)
                     if not job.always_runs: #there is no need for the job injecting jobs to invalidate just because they need to be run.
                         job.invalidated('not done')
-                        if not job.was_invalidated:
+                        if not job.was_invalidated: #paranoia
                             raise ppg_exceptions.RuntimeException("job.invalidated called, but was_invalidated was false")
                 #for preq in job.prerequisites:
                     #preq.require_loading() #think I can get away with  lettinng the slaves what they need to execute a given job...
@@ -326,7 +350,7 @@ class Pipegraph(object):
     def check_all_jobs_can_be_executed(self):
         """Check all jobs for memory/cpu requirements and prune those that we can't satisfy"""
         resources = self.rc.get_resources() # a dict of slave name > {cores: y, memory: x}
-        maximal_memory = max([x['memory'] for x in resources.values()])
+        maximal_memory = max([x['physical_memory'] + x['swap_memory'] for x in resources.values()])
         maximal_cores = max([x['cores'] for x in resources.values()])
         if maximal_cores == 0:
             raise ppg_exceptions.RuntimeException("No cores available?!")
@@ -353,11 +377,18 @@ class Pipegraph(object):
             self.rc.enter_loop() #doesn't return until all jobs have been done.
             logger.info("Control returned from ResourceCoordinator")
 
+    def cleanup_jobs_that_requested_it(self):
+        """Temporary* generating jobs that don't get run (because their downstream is done) might still attempt to clean up their output. They register by setting do_cleanup_if_was_never_run = True"""
+        for job in self.jobs.values():
+            if job.do_cleanup_if_was_never_run and not job.was_run:
+                job.cleanup()
+
     def start_jobs(self): #I really don't like this function... and I also have the strong inkling it should acttually sit in the resource coordinatora
         #first, check what we actually have some resources...
         resources = self.rc.get_resources() # a dict of slave name > {cores: y, memory: x}
         for slave in resources:
-            resources[slave]['memory/core'] = resources[slave]['memory'] / resources[slave]['cores']
+            resources[slave]['memory/core'] = resources[slave]['physical_memory'] / resources[slave]['cores']
+            resources[slave]['memory'] = resources[slave]['physical_memory'] 
             resources[slave]['total cores'] = resources[slave]['cores']
         #substract the running jobs
         for job in self.running_jobs:
@@ -423,7 +454,15 @@ class Pipegraph(object):
                             break
                         else:
                             if (job.cores_needed == -1 and resources[slave]['cores'] == resources[slave]['total cores']
-                                and (job.memory_needed == -1 or job.memory_needed < resources[slave]['memory'])):
+                                and (job.memory_needed == -1 or 
+                                    (
+                                        job.memory_needed < resources[slave]['memory']
+                                        or (
+                                            (resources[slave]['memory'] == resources[slave]['physical_memory']) and 
+                                            job.memory_needed < resources[slave]['physical_memory'] + resources[slave]['swap_memory'])
+                                        )
+                                        
+                                        )):
                                     job.slave_name = slave
                                     self.slaves[slave].spawn(job)
                                     logger.info("running_jobs added2 :%s" % job)
@@ -433,7 +472,13 @@ class Pipegraph(object):
                                     #don't worry about memory...
                                     break
                             elif (job.cores_needed <= resources[slave]['cores'] and (job.cores_needed != -1) 
-                                and (job.memory_needed == -1 or job.memory_needed < resources[slave]['memory'])):
+                                and (job.memory_needed == -1 or 
+                                    (
+                                        job.memory_needed < resources[slave]['memory']
+                                        or (
+                                            (resources[slave]['memory'] == resources[slave]['physical_memory']) and 
+                                            job.memory_needed < resources[slave]['physical_memory'] + resources[slave]['swap_memory'])
+                                        ))):
                                 job.slave_name = slave
                                 self.slaves[slave].spawn(job)
                                 logger.info("running_jobs added3 :%s" % job)
@@ -447,7 +492,7 @@ class Pipegraph(object):
                                 break
                             else:
                                 #this job needed to much resources, or was not runnable
-                                #logger.info("Job needed too many resources %s" % job)
+                                logger.info("Job needed too many resources %s" % job)
                                 runnable_jobs.remove(job) #can't run right now on this slave..., maybe later...
                         next_job += 1
                     logger.info('Resources after spawning %s' % resources)
@@ -516,15 +561,31 @@ class Pipegraph(object):
             #logger.info('new job %s' % job)
             check_preqs(job)
             self.jobs[job.job_id] = job
-        for job in new_jobs.values():
+        for job in new_jobs.values(): #canonize these jobs
             job.prerequisites = set([self.jobs[job_id] for job_id in job.prerequisites])
             job.dependants = set([self.jobs[job_id] for job_id in job.dependants])
         for job in new_jobs.values():
             if not job.is_done():
-                job.invalidated(reason = 'not done')
+                if not job.always_runs:
+                    job.invalidated(reason = 'not done')
         self.connect_graph()
         self.distribute_invariant_changes()
+        #we not only need to check the jobs we have received, we also need to check their dependands
+        #for example there might have been a DependencyInjectionJob than injected a DataLoadingJob
+        #that had it's invariant FunctionInvariant changed...
+        jobs_to_check = set(new_jobs.values())
+        def add_dependands(j):
+            for dep in j.dependants:
+                if not dep in self.possible_execution_order: #don't add it twice
+                    jobs_to_check.add(dep)
+                add_dependands(dep)
         for job in new_jobs.values():
+            if job.was_invalidated:
+                add_dependands(job)
+        #and now, let's see what new stuff needs to be done.
+        for job in jobs_to_check:
+            if job.was_run:
+                raise ValueError("A job that was already run was readded to the check-if-it-needs executing list. This should not happen")
             if job.is_loadable():
                 logger.info("Ignoring %s" % job)
                 pass
@@ -550,9 +611,6 @@ class Pipegraph(object):
         so that they're still fresh"""
         for job_id in self.new_jobs:
             self.jobs[job_id] = self.new_jobs[job_id]
-
-
-
 
     def print_failed_job(self, job, file_handle):
         print >> file_handle, '-' * 75
@@ -592,5 +650,14 @@ class Pipegraph(object):
                 op.write("<p>")
                 op.write(job.job_id + " was ok")
             op.write("</p>")
+        op.close()
+
+    def dump_graph(self):
+        op = open("logs/ppg_graph.txt",'wb')
+        for job in self.jobs.values():
+            op.write("%s - done: %s\n" % (job, job.is_done()))
+            for preq in job.prerequisites:
+                op.write("\t%s - done: %s\n" % (preq, preq.is_done()))
+            op.write("\n")
         op.close()
 

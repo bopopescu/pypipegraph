@@ -30,6 +30,10 @@ def append(filename, string):
     op.write(string)
     op.close()
 
+def writeappend(filename_write, filename_append, string):
+    write(filename_write, string)
+    append(filename_append, string)
+
 def magic(filename):
     """See what linux 'file' commando says about that file"""
     if not os.path.exists(filename):
@@ -1659,10 +1663,11 @@ class DependencyTests(PPGPerTest):
         jobC = ppg.FileGeneratingJob('out/C', lambda: write('out/C', read('out/A') + read('out/B') + read('out/D')))
         jobD = ppg.FileGeneratingJob('out/D', lambda: write('out/D', 'D'))
         jobC.depends_on([jobA, [jobB, jobD]])
-        ppg.run_pipegraph()
         self.assertTrue(jobD in jobC.prerequisites)
         self.assertTrue(jobA in jobC.prerequisites)
         self.assertTrue(jobB in jobC.prerequisites)
+        ppg.run_pipegraph()
+        self.assertTrue(jobC.prerequisites is None)
         self.assertTrue(read('out/A'), 'A')
         self.assertTrue(read('out/B'), 'B')
         self.assertTrue(read('out/C'), 'ABD')
@@ -1764,19 +1769,19 @@ class DependencyInjectionJobTests(PPGPerTest):
 
     def test_injecting_into_data_loading_does_not_retrigger(self):
         o = Dummy()
-
+        def do_write():
+            append('out/A', o.a + o.b)
+            append('out/B', 'X')
+        def dl_a():
+                o.a = 'A'
         def do_run():
             of = 'out/A'
-            def do_write():
-                append('out/A', o.a + o.b)
-                append('out/B', 'X')
-            def dl_a():
-                o.a = 'A'
             def inject():
                 def dl_b():
                     o.b = 'B'
                 job_dl_b = ppg.DataLoadingJob('ob', dl_b)
                 job_dl.depends_on(job_dl_b)
+
             job_fg = ppg.FileGeneratingJob(of, do_write)
             job_dl = ppg.DataLoadingJob('oa', dl_a)
             job_fg.depends_on(job_dl)
@@ -1793,11 +1798,6 @@ class DependencyInjectionJobTests(PPGPerTest):
         #now let's test if a change triggers the rerun
         def do_run2():
             of = 'out/A'
-            def do_write():
-                append('out/A', o.a + o.b)
-                append('out/B', 'X')
-            def dl_a():
-                o.a = 'A'
             def inject():
                 def dl_b():
                     o.b = 'C' #so this dl has changed...
@@ -1989,6 +1989,31 @@ class JobGeneratingJobTests(PPGPerTest):
         ppg.run_pipegraph()
         self.assertEqual(read('out/C'), 'Ashu')
         self.assertEqual(read('out/D'), 'Bshu')
+
+    def test_filegen_invalidated_jobgen_created_filegen_later_also_invalidated(self):
+        a = ppg.FileGeneratingJob('out/A', lambda : writeappend("out/A", 'out/Ax', "A"))
+        p = ppg.ParameterInvariant('p', 'p')
+        a.depends_on(p)
+        def gen():
+            c = ppg.FileGeneratingJob('out/C', lambda: writeappend("out/C", 'out/Cx', "C"))
+            c.depends_on(a)
+        b = ppg.JobGeneratingJob('b', gen)
+        ppg.run_pipegraph()
+        self.assertEqual(read('out/A'), 'A')
+        self.assertEqual(read('out/Ax'), 'A')
+        self.assertEqual(read('out/C'), 'C')
+        self.assertEqual(read('out/Cx'), 'C')
+        ppg.new_pipegraph(rc_gen(), quiet=True)
+
+        a = ppg.FileGeneratingJob('out/A', lambda : writeappend("out/A", 'out/Ax', "A"))
+        p = ppg.ParameterInvariant('p', 'p2')
+        a.depends_on(p)
+        b = ppg.JobGeneratingJob('b', gen)
+        ppg.run_pipegraph()
+        self.assertEqual(read('out/Ax'), 'AA')
+        self.assertEqual(read('out/Cx'), 'CC')
+
+
 
 import exptools # i really don't like this, but it seems to be the only way to test this
 exptools.load_software('pyggplot')
@@ -2691,8 +2716,26 @@ class UtilTests(unittest.TestCase):
 
 
 class NotYetImplementedTests(unittest.TestCase):
-    pass
 
+    def test_temp_jobs_and_gen_jobs(self):
+        #DependencyInjection A creates TempJob B and job C (c is already done)
+        #DependencyInjeciton D (dep on A) creates TempJob B and job E
+        #Now, When A runs, B is created, and not added to the jobs-to-run list
+        #since it is not necessary (with C being done).
+        #now D runs, B would not be required by E, but does not get added to the 
+        #run list (since it is not new), and later on, the sanity check crashes.
+
+        #alternativly, if C is not done, execution order is A, B, C. Then cleanup
+        #for B happens, then D is run, the E explodes, because cleanup has been done!
+        
+        #now, if A returns B, it get's injected into the dependenies of D,
+        #the exeuction order is correct, but B get's done no matter what because D
+        #now requires it, even if both C and E have already been done.
+    
+        #what a conundrum
+
+
+        pass
 
 
 

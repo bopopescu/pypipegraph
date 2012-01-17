@@ -53,7 +53,7 @@ class Job(object):
     def __new__(cls, job_id, *args, **kwargs):
         #logger.info("New for %s %s" % (cls, job_id))
         if not isinstance(job_id, str):
-            raise ValueError("Job_id must be a string")
+            raise ValueError("Job_id must be a string, was %s" % repr(job_id))
         if not job_id in util.job_uniquifier:
             util.job_uniquifier[job_id] = object.__new__(cls)
             util.job_uniquifier[job_id].job_id = job_id #doing it later will fail because hash apperantly might be called before init has run?
@@ -88,9 +88,13 @@ class Job(object):
             self.was_done_on = set() #on which slave(s) was this job run?
             self.was_loaded = False
             self.was_invalidated = False
+            self.invalidation_count = 0 #used to save some time in graph.distribute_invariant_changes 
+            self.was_cleaned_up = False
             self.always_runs = False
             self.start_time = None
             self.stop_time = None
+            self.is_final_job = False
+            self.do_cleanup_if_was_never_run = False
         #logger.info("adding self %s to %s" % (job_id, id(util.global_pipegraph)))
         util.global_pipegraph.add_job(util.job_uniquifier[job_id])
 
@@ -110,6 +114,8 @@ class Job(object):
             else:
                 if self in job.prerequisites:
                     raise ppg_exceptions.CycleError("Cycle adding %s to %s" % (self.job_id, job.job_id))
+                if isinstance(job, FinalJob):
+                    raise ppg_exceptions.JobContractError("No jobs can depend on FinalJobs")
         for job in job_joblist_or_list_of_jobs:
             if isinstance(job, Job): #skip the lists here, they will be delegated to further calls during the checking... 
                 self.prerequisites.add(job)
@@ -159,8 +165,12 @@ class Job(object):
     def invalidated(self, reason = ''):
         logger.info("%s invalidated called, reason: %s" % (self, reason))
         self.was_invalidated = True
+        self.distribute_invalidation()
+
+    def distribute_invalidation(self):
         for dep in self.dependants:
-            dep.invalidated(reason = 'preq invalidated %s' % self)
+            if not dep.was_invalidated:
+                dep.invalidated(reason = 'preq invalidated %s' % self)
 
     def can_run_now(self):
         #logger.info("can_run_now %s" % self)
@@ -194,7 +204,13 @@ class Job(object):
                     pass
             else:
                 #logger.info("case 3 - not done")
-                res.append((preq,'not done'))
+                if preq.was_run:
+                    if preq.was_cleaned_up:
+                        res.append((preq,'not done - but was run! - after cleanup'))
+                    else:
+                        res.append((preq,'not done - but was run! - no cleanup'))
+                else:
+                    res.append((preq,'not done'))
                 break
                 #return False
         return res
@@ -214,6 +230,7 @@ class Job(object):
             if all_done:
                 logger.info("Calling %s cleanup" % preq)
                 preq.cleanup()
+                preq.was_cleaned_up = True
 
     def cleanup(self):
         pass
@@ -339,14 +356,18 @@ class FileChecksumInvariant(_InvariantJob):
         st = os.stat(self.input_file)
         filetime = st[stat.ST_MTIME]
         filesize = st[stat.ST_SIZE]
-        if not old or old[1] != filesize or old[0] != filetime:
-            chksum = self.checksum()
-            if old and old[2] == chksum:
-                raise util.NothingChanged((filetime, filesize, chksum))
+        try:
+            if not old or old[1] != filesize or old[0] != filetime:
+                chksum = self.checksum()
+                if old and old[2] == chksum:
+                    raise util.NothingChanged((filetime, filesize, chksum))
+                else:
+                    return filetime, filesize, chksum
             else:
-                return filetime, filesize, chksum
-        else:
-            return old
+                return old
+        except TypeError: #could not parse old tuple... possibly was an FileTimeInvariant before...
+            chksum = self.checksum()
+            return filetime, filesize, chksum
 
     def checksum(self):
         op = open(self.job_id, 'rb')
@@ -610,30 +631,36 @@ class _GraphModifyingJob(Job):
 
 
 class DependencyInjectionJob(_GraphModifyingJob):
-    def __init__(self, job_id, callback):
+    def __init__(self, job_id, callback, check_for_dependency_injections = True):
         if not hasattr(callback, '__call__'):
             raise ValueError("callback was not a callable")
         Job.__init__(self, job_id)
         self.callback = callback
         self.do_ignore_code_changes = False
         self.always_runs = True
+        self.check_for_dependency_injections = check_for_dependency_injections
 
     def ignore_code_changes(self):
-        self.do_ignore_code_changes = True
+        pass
 
     def inject_auto_invariants(self):
-        if not self.do_ignore_code_changes:
-            self.depends_on(FunctionInvariant(self.job_id + '_func', self.callback))
+        #if not self.do_ignore_code_changes:
+            #self.depends_on(FunctionInvariant(self.job_id + '_func', self.callback))
+        pass
 
     def run(self):
         #this is different form JobGeneratingJob.run in it's checking of the contract
         util.global_pipegraph.new_jobs = {}
         logger.info("DependencyInjectionJob.dependants = %s %s" % (", ".join(str(x) for x in self.dependants), id(self.dependants)))
-        self.callback()
+        reported_jobs = self.callback()
         logger.info("DependencyInjectionJob.dependants after callback = %s %s" % (", ".join(str(x) for x in self.dependants), id(self.dependants)))
         logger.info("new_jobs count: %i, id %s"  % ( len(util.global_pipegraph.new_jobs), id(util.global_pipegraph.new_jobs)))
         for new_job in util.global_pipegraph.new_jobs.values():
             new_job.inject_auto_invariants()
+        if reported_jobs:
+            for new_job in reported_jobs:
+                for my_dependand in self.dependants:
+                    my_dependand.depends_on(new_job)
         #we now need to fill new_jobs.dependants
         #these implementations are much better than the old for loop based ones
         #but still could use some improvements
@@ -650,8 +677,10 @@ class DependencyInjectionJob(_GraphModifyingJob):
         #I need to check: All new jobs are now prereqs of my dependands
 
         #I also need to check that none of the jobs that ain't dependand on me have been injected
-        logger.info("Checking for dependency injection violations")
-        if True:
+        if not self.check_for_dependency_injections:
+            logger.info("Skipping check for dependency injection violations")
+        else:
+            logger.info("Checking for dependency injection violations")
             for job in util.global_pipegraph.jobs.values():
                 if job in self.dependants:
                     for new_job in util.global_pipegraph.new_jobs.values():
@@ -682,11 +711,10 @@ class JobGeneratingJob(_GraphModifyingJob):
         self.always_runs = True
 
     def ignore_code_changes(self):
-        self.do_ignore_code_changes = True
+        pass
 
     def inject_auto_invariants(self):
-        if not self.do_ignore_code_changes:
-            self.depends_on(FunctionInvariant(self.job_id + '_func', self.callback))
+        pass
 
 
     def run(self):
@@ -707,6 +735,36 @@ class JobGeneratingJob(_GraphModifyingJob):
         logger.info("Returning from %s" % self)
         return res
 
+class FinalJob(Job):
+    """A final job runs after all other (non final) jobs have run.
+    Use these sparringly - they really only make sense for things where you really want to hook
+    'after the pipeline has run', everything else realy is better of if you depend on the appropriate job
+
+    FinalJobs are also run on each run - but only iff no other job died
+    """
+
+    def __init__(self, jobid, callback):
+        Job.__init__(self, jobid)
+        self.callback = callback
+        self.is_final_job = True
+        self.do_ignore_code_changes = False
+        self.always_runs = True
+
+    def is_done(self, depth = 0):
+        return self.was_run
+
+    def depends_on(self):
+        raise ValueError("Final jobs can not have explicit dependencies - they run in random order after all other jobs")
+
+    def ignore_code_changes(self):
+        pass
+
+    def inject_auto_invariants(self):
+        pass
+
+    def run(self):
+        self.callback()
+
 class PlotJob(FileGeneratingJob): 
     """Calculate some data for plotting, cache it in cache/output_filename , and plot from there.
     creates two jobs, a plot_job (this one) and a cache_job (FileGeneratingJob, in self.cache_job), 
@@ -714,8 +772,8 @@ class PlotJob(FileGeneratingJob):
     def __init__(self, output_filename, calc_function, plot_function, render_args = None, skip_table = False, skip_caching = False):
         if not isinstance(output_filename , str) or isinstance(output_filename , unicode):
             raise ValueError("output_filename was not a string or unicode")
-        if not (output_filename.endswith('.png') or output_filename.endswith('.pdf')):
-            raise ValueError("Don't know how to create this file %s, must end on .png or .pdf" % output_filename)
+        if not (output_filename.endswith('.png') or output_filename.endswith('.pdf') or output_filename.endswith('.svg')):
+            raise ValueError("Don't know how to create this file %s, must end on .png or .pdf or .svg" % output_filename)
 
         self.output_filename = output_filename
         self.table_filename = self.output_filename + '.tsv'
