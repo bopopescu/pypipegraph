@@ -163,6 +163,7 @@ class Pipegraph(object):
         self.check_cycles()
         self.load_invariant_status()
         self.distribute_invariant_changes()
+        self.dump_invariant_status() # the jobs will have removed their output, so we can safely store the invariant data
         self.build_todo_list()
         self.dump_graph()
 
@@ -340,11 +341,14 @@ class Pipegraph(object):
         finished = False
         while not finished:
             try:
-                op = open(self.invariant_status_filename, 'wb')
+                op = open(self.invariant_status_filename + '.temp', 'wb')
                 for key, value in self.invariant_status.items():
                     cPickle.dump(key, op, cPickle.HIGHEST_PROTOCOL)
                     cPickle.dump(value, op, cPickle.HIGHEST_PROTOCOL)
                 op.close()
+                if os.path.exists(self.invariant_status_filename):
+                    os.unlink(self.invariant_status_filename)
+                os.rename(self.invariant_status_filename + '.temp', self.invariant_status_filename)
                 finished = True
             except KeyboardInterrupt:
                 pass
