@@ -1,3 +1,27 @@
+"""
+The MIT License (MIT)
+
+Copyright (c) 2012, Florian Finkernagel <finkernagel@imt.uni-marburg.de>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+"""
+
 import unittest
 import time
 import sys
@@ -29,6 +53,10 @@ def append(filename, string):
     op = open(filename, 'ab')
     op.write(string)
     op.close()
+
+def writeappend(filename_write, filename_append, string):
+    write(filename_write, string)
+    append(filename_append, string)
 
 def magic(filename):
     """See what linux 'file' commando says about that file"""
@@ -81,6 +109,17 @@ class SimpleTests(unittest.TestCase):
             ppg.run_pipegraph()
         self.assertRaises(ValueError, inner)
 
+    def test_non_default_status_filename(self):
+        try:
+            ppg.forget_job_status('shu.dat')
+            ppg.forget_job_status()
+            ppg.new_pipegraph(quiet=True, invariant_status_filename = 'shu.dat')
+            jobA = ppg.FileGeneratingJob('out/A', lambda: write('out/A','A'))
+            ppg.run_pipegraph()
+            self.assertTrue(os.path.exists('shu.dat'))
+            self.assertFalse(os.path.exists(ppg.graph.invariant_status_filename_default))
+        finally:
+            ppg.forget_job_status('shu.dat')
 
 
 class CycleTests(unittest.TestCase):
@@ -156,8 +195,6 @@ class JobTests(unittest.TestCase):
         def inner():
             job_dl = ppg.DataLoadingJob(of, job)
         self.assertRaises(ValueError, inner)
-
-
 
     def test_addition(self):
         def write_func(of):
@@ -1511,6 +1548,32 @@ class FunctionInvariantTests(PPGPerTest):
             jobC = ppg.FunctionInvariant('A', lambda: 'b') #raises ValueError
         self.assertRaises(ppg.JobContractError, inner)
 
+    def test_instance_functions_raise(self):
+        class shu:
+            def __init__(self, letter):
+                self.letter = letter
+
+            def get_job(self):
+                job = ppg.FileGeneratingJob('out/' + self.letter,lambda: append('out/' + self.letter, 'A'))
+                job.depends_on(ppg.FunctionInvariant('shu.sha', self.sha))
+                return job
+
+            def sha(self):
+                return 55 * 23
+
+        x = shu('A')
+        x.get_job()
+        ppg.run_pipegraph()
+        self.assertEqual(read('out/A'), 'A')
+        append('out/A', 'A')
+
+        ppg.new_pipegraph()
+        x.get_job()
+        y = shu('B')
+        def inner():
+            y.get_job()
+        self.assertRaises(ppg.JobContractError, inner)
+
 class DependencyTests(PPGPerTest):
 
 
@@ -1986,222 +2049,241 @@ class JobGeneratingJobTests(PPGPerTest):
         self.assertEqual(read('out/C'), 'Ashu')
         self.assertEqual(read('out/D'), 'Bshu')
 
-import exptools # i really don't like this, but it seems to be the only way to test this
-exptools.load_software('pyggplot')
-
-
-class PlotJobTests(PPGPerTest):
-    def setUp(self):
-        PPGPerTest.setUp(self)
-
-    def test_basic(self):
-        import pydataframe
-        import pyggplot
-        def calc():
-            return pydataframe.DataFrame({"X": range(0, 100), 'Y': range(50, 150)})
-        def plot(df):
-            return pyggplot.Plot(df).add_scatter('X','Y')
-        of = 'out/test.png'
-        job = ppg.PlotJob(of, calc, plot)
+    def test_filegen_invalidated_jobgen_created_filegen_later_also_invalidated(self):
+        a = ppg.FileGeneratingJob('out/A', lambda : writeappend("out/A", 'out/Ax', "A"))
+        p = ppg.ParameterInvariant('p', 'p')
+        a.depends_on(p)
+        def gen():
+            c = ppg.FileGeneratingJob('out/C', lambda: writeappend("out/C", 'out/Cx', "C"))
+            c.depends_on(a)
+        b = ppg.JobGeneratingJob('b', gen)
         ppg.run_pipegraph()
-        self.assertTrue(magic(of).find('PNG image') != -1)
+        self.assertEqual(read('out/A'), 'A')
+        self.assertEqual(read('out/Ax'), 'A')
+        self.assertEqual(read('out/C'), 'C')
+        self.assertEqual(read('out/Cx'), 'C')
+        ppg.new_pipegraph(rc_gen(), quiet=True)
 
-    def test_pdf(self):
-        import pydataframe
-        import pyggplot
-        def calc():
-            return pydataframe.DataFrame({"X": range(0, 100), 'Y': range(50, 150)})
-        def plot(df):
-            return pyggplot.Plot(df).add_scatter('X','Y')
-        of = 'out/test.pdf'
-        job = ppg.PlotJob(of, calc, plot)
+        a = ppg.FileGeneratingJob('out/A', lambda : writeappend("out/A", 'out/Ax', "A"))
+        p = ppg.ParameterInvariant('p', 'p2')
+        a.depends_on(p)
+        b = ppg.JobGeneratingJob('b', gen)
         ppg.run_pipegraph()
-        self.assertTrue(magic(of).find('PDF document') != -1)
+        self.assertEqual(read('out/Ax'), 'AA')
+        self.assertEqual(read('out/Cx'), 'CC')
 
-    def test_raises_on_invalid_filename(self):
-        import pydataframe
-        import pyggplot
-        def calc():
-            return pydataframe.DataFrame({"X": range(0, 100), 'Y': range(50, 150)})
-        def plot(df):
-            return pyggplot.Plot(df).add_scatter('X','Y')
-        of = 'out/test.shu'
-        def inner():
+
+
+
+try:
+    import pyggplot
+    pyggplot_available = True
+except:
+    pyggplot_available = False
+if pyggplot_available:
+    class PlotJobTests(PPGPerTest):
+        def setUp(self):
+            PPGPerTest.setUp(self)
+
+        def test_basic(self):
+            import pydataframe
+            def calc():
+                return pydataframe.DataFrame({"X": range(0, 100), 'Y': range(50, 150)})
+            def plot(df):
+                return pyggplot.Plot(df).add_scatter('X','Y')
+            of = 'out/test.png'
             job = ppg.PlotJob(of, calc, plot)
-        self.assertRaises(ValueError, inner)
-
-
-    def test_reruns_just_plot_if_plot_changed(self):
-        import pydataframe
-        import pyggplot
-        def calc():
-            append('out/calc', 'A')
-            return pydataframe.DataFrame({"X": range(0, 100), 'Y': range(50, 150)})
-        def plot(df):
-            append('out/plot', 'B')
-            return pyggplot.Plot(df).add_scatter('X','Y')
-        of = 'out/test.png'
-        job = ppg.PlotJob(of, calc, plot)
-        ppg.run_pipegraph()
-        self.assertTrue(magic(of).find('PNG image') != -1)
-        self.assertEqual(read('out/calc'),'A')
-        self.assertEqual(read('out/plot'),'B')
-
-        ppg.new_pipegraph(rc_gen(), quiet=True)
-        def plot2(df):
-            append('out/plot', 'B')
-            return pyggplot.Plot(df).add_scatter('Y','X')
-        job = ppg.PlotJob(of, calc, plot2)
-        ppg.run_pipegraph()
-        self.assertTrue(magic(of).find('PNG image') != -1)
-        self.assertEqual(read('out/calc'),'A')
-        self.assertEqual(read('out/plot'),'BB')
-
-    def test_no_rerun_if_ignore_code_changes_and_plot_changes(self):
-        import pydataframe
-        import pyggplot
-        def calc():
-            append('out/calc', 'A')
-            return pydataframe.DataFrame({"X": range(0, 100), 'Y': range(50, 150)})
-        def plot(df):
-            append('out/plot', 'B')
-            return pyggplot.Plot(df).add_scatter('X','Y')
-        of = 'out/test.png'
-        job = ppg.PlotJob(of, calc, plot)
-        ppg.run_pipegraph()
-        self.assertTrue(magic(of).find('PNG image') != -1)
-        self.assertEqual(read('out/calc'),'A')
-        self.assertEqual(read('out/plot'),'B')
-
-        ppg.new_pipegraph(rc_gen(), quiet=True)
-        def plot2(df):
-            append('out/plot', 'B')
-            return pyggplot.Plot(df).add_scatter('Y','X')
-        job = ppg.PlotJob(of, calc, plot2)
-        job.ignore_code_changes()
-        ppg.run_pipegraph()
-        self.assertTrue(magic(of).find('PNG image') != -1)
-        self.assertEqual(read('out/calc'),'A')
-        self.assertEqual(read('out/plot'),'B')
-
-
-    def test_reruns_both_if_calc_changed(self):
-        import pydataframe
-        import pyggplot
-        def calc():
-            append('out/calc', 'A')
-            return pydataframe.DataFrame({"X": range(0, 100), 'Y': range(50, 150)})
-        def plot(df):
-            append('out/plot', 'B')
-            return pyggplot.Plot(df).add_scatter('X','Y')
-        of = 'out/test.png'
-        job = ppg.PlotJob(of, calc, plot)
-        ppg.run_pipegraph()
-        self.assertTrue(magic(of).find('PNG image') != -1)
-        self.assertEqual(read('out/calc'),'A')
-        self.assertEqual(read('out/plot'),'B')
-
-        ppg.new_pipegraph(rc_gen(), quiet=True)
-        def calc2():
-            append('out/calc', 'A')
-            x = 5
-            return pydataframe.DataFrame({"X": range(0, 100), 'Y': range(50, 150)})
-        job = ppg.PlotJob(of, calc2, plot)
-        ppg.run_pipegraph()
-        self.assertTrue(magic(of).find('PNG image') != -1)
-        self.assertEqual(read('out/calc'),'AA')
-        self.assertEqual(read('out/plot'),'BB')
-
-    def test_no_rerun_if_calc_change_but_ignore_codechanges(self):
-        import pydataframe
-        import pyggplot
-        def calc():
-            append('out/calc', 'A')
-            return pydataframe.DataFrame({"X": range(0, 100), 'Y': range(50, 150)})
-        def plot(df):
-            append('out/plot', 'B')
-            return pyggplot.Plot(df).add_scatter('X','Y')
-        of = 'out/test.png'
-        job = ppg.PlotJob(of, calc, plot)
-        ppg.run_pipegraph()
-        self.assertTrue(magic(of).find('PNG image') != -1)
-        self.assertEqual(read('out/calc'),'A')
-        self.assertEqual(read('out/plot'),'B')
-
-        ppg.new_pipegraph(rc_gen(), quiet=True)
-        def calc2():
-            append('out/calc', 'A')
-            x = 5
-            return pydataframe.DataFrame({"X": range(0, 100), 'Y': range(50, 150)})
-        job = ppg.PlotJob(of, calc2, plot)
-        job.ignore_code_changes()
-        ppg.run_pipegraph()
-        self.assertTrue(magic(of).find('PNG image') != -1)
-        self.assertEqual(read('out/calc'),'A')
-
-        self.assertEqual(read('out/plot'),'B')
-    def test_plot_job_dependencies_are_added_to_just_the_cache_job(self):
-        import pydataframe
-        import pyggplot
-
-        def calc():
-            return pydataframe.DataFrame({"X": range(0, 100), 'Y': range(50, 150)})
-        def plot(df):
-            return pyggplot.Plot(df).add_scatter('X','Y')
-        of = 'out/test.png'
-        job = ppg.PlotJob(of, calc, plot)
-        dep = ppg.FileGeneratingJob('out/A', lambda : write('out/A', 'A'))
-        job.depends_on(dep)
-        #self.assertTrue(dep in job.prerequisites)
-        self.assertTrue(dep in job.cache_job.prerequisites)
-
-    def test_raises_if_calc_returns_non_df(self):
-        #import pydataframe
-        import pyggplot
-        def calc():
-            return None
-        def plot(df):
-            append('out/plot', 'B')
-            return pyggplot.Plot(df).add_scatter('X','Y')
-        of = 'out/test.png'
-        job = ppg.PlotJob(of, calc, plot)
-        try:
             ppg.run_pipegraph()
-            raise ValueError("should not be reached")
-        except ppg.RuntimeError:
-            pass 
-        self.assertTrue(isinstance(job.cache_job.exception, ppg.JobContractError))
+            self.assertTrue(magic(of).find('PNG image') != -1)
 
-    def test_raises_if_plot_returns_non_plot(self):
-        import pydataframe
-        #import pyggplot
-        def calc():
-            return pydataframe.DataFrame({"X": range(0, 100), 'Y': range(50, 150)})
-        def plot(df):
-            return None
-        of = 'out/test.png'
-        job = ppg.PlotJob(of, calc, plot)
-        try:
+        def test_pdf(self):
+            import pydataframe
+            def calc():
+                return pydataframe.DataFrame({"X": range(0, 100), 'Y': range(50, 150)})
+            def plot(df):
+                return pyggplot.Plot(df).add_scatter('X','Y')
+            of = 'out/test.pdf'
+            job = ppg.PlotJob(of, calc, plot)
             ppg.run_pipegraph()
-            raise ValueError("should not be reached")
-        except ppg.RuntimeError:
-            pass 
-        self.assertTrue(isinstance(job.exception, ppg.JobContractError))
+            self.assertTrue(magic(of).find('PDF document') != -1)
 
-    def test_passing_non_function_for_calc(self):
-        def inner():
-            job = ppg.PlotJob('out/a', 'shu', lambda df: 1)
-        self.assertRaises(ValueError, inner)
+        def test_raises_on_invalid_filename(self):
+            import pydataframe
+            def calc():
+                return pydataframe.DataFrame({"X": range(0, 100), 'Y': range(50, 150)})
+            def plot(df):
+                return pyggplot.Plot(df).add_scatter('X','Y')
+            of = 'out/test.shu'
+            def inner():
+                job = ppg.PlotJob(of, calc, plot)
+            self.assertRaises(ValueError, inner)
 
-    def test_passing_non_function_for_plot(self):
-        def inner():
-            job = ppg.PlotJob('out/a', lambda: 55, 'shu')
-        self.assertRaises(ValueError, inner)
 
-    def test_passing_non_string_as_jobid(self):
-        def inner():
-            job = ppg.PlotJob(5, lambda: 1, lambda df: 34)
-        self.assertRaises(ValueError, inner)
+        def test_reruns_just_plot_if_plot_changed(self):
+            import pydataframe
+            def calc():
+                append('out/calc', 'A')
+                return pydataframe.DataFrame({"X": range(0, 100), 'Y': range(50, 150)})
+            def plot(df):
+                append('out/plot', 'B')
+                return pyggplot.Plot(df).add_scatter('X','Y')
+            of = 'out/test.png'
+            job = ppg.PlotJob(of, calc, plot)
+            ppg.run_pipegraph()
+            self.assertTrue(magic(of).find('PNG image') != -1)
+            self.assertEqual(read('out/calc'),'A')
+            self.assertEqual(read('out/plot'),'B')
+
+            ppg.new_pipegraph(rc_gen(), quiet=True)
+            def plot2(df):
+                append('out/plot', 'B')
+                return pyggplot.Plot(df).add_scatter('Y','X')
+            job = ppg.PlotJob(of, calc, plot2)
+            ppg.run_pipegraph()
+            self.assertTrue(magic(of).find('PNG image') != -1)
+            self.assertEqual(read('out/calc'),'A')
+            self.assertEqual(read('out/plot'),'BB')
+
+        def test_no_rerun_if_ignore_code_changes_and_plot_changes(self):
+            import pydataframe
+            def calc():
+                append('out/calc', 'A')
+                return pydataframe.DataFrame({"X": range(0, 100), 'Y': range(50, 150)})
+            def plot(df):
+                append('out/plot', 'B')
+                return pyggplot.Plot(df).add_scatter('X','Y')
+            of = 'out/test.png'
+            job = ppg.PlotJob(of, calc, plot)
+            ppg.run_pipegraph()
+            self.assertTrue(magic(of).find('PNG image') != -1)
+            self.assertEqual(read('out/calc'),'A')
+            self.assertEqual(read('out/plot'),'B')
+
+            ppg.new_pipegraph(rc_gen(), quiet=True)
+            def plot2(df):
+                append('out/plot', 'B')
+                return pyggplot.Plot(df).add_scatter('Y','X')
+            job = ppg.PlotJob(of, calc, plot2)
+            job.ignore_code_changes()
+            ppg.run_pipegraph()
+            self.assertTrue(magic(of).find('PNG image') != -1)
+            self.assertEqual(read('out/calc'),'A')
+            self.assertEqual(read('out/plot'),'B')
+
+
+        def test_reruns_both_if_calc_changed(self):
+            import pydataframe
+            def calc():
+                append('out/calc', 'A')
+                return pydataframe.DataFrame({"X": range(0, 100), 'Y': range(50, 150)})
+            def plot(df):
+                append('out/plot', 'B')
+                return pyggplot.Plot(df).add_scatter('X','Y')
+            of = 'out/test.png'
+            job = ppg.PlotJob(of, calc, plot)
+            ppg.run_pipegraph()
+            self.assertTrue(magic(of).find('PNG image') != -1)
+            self.assertEqual(read('out/calc'),'A')
+            self.assertEqual(read('out/plot'),'B')
+
+            ppg.new_pipegraph(rc_gen(), quiet=True)
+            def calc2():
+                append('out/calc', 'A')
+                x = 5
+                return pydataframe.DataFrame({"X": range(0, 100), 'Y': range(50, 150)})
+            job = ppg.PlotJob(of, calc2, plot)
+            ppg.run_pipegraph()
+            self.assertTrue(magic(of).find('PNG image') != -1)
+            self.assertEqual(read('out/calc'),'AA')
+            self.assertEqual(read('out/plot'),'BB')
+
+        def test_no_rerun_if_calc_change_but_ignore_codechanges(self):
+            import pydataframe
+            def calc():
+                append('out/calc', 'A')
+                return pydataframe.DataFrame({"X": range(0, 100), 'Y': range(50, 150)})
+            def plot(df):
+                append('out/plot', 'B')
+                return pyggplot.Plot(df).add_scatter('X','Y')
+            of = 'out/test.png'
+            job = ppg.PlotJob(of, calc, plot)
+            ppg.run_pipegraph()
+            self.assertTrue(magic(of).find('PNG image') != -1)
+            self.assertEqual(read('out/calc'),'A')
+            self.assertEqual(read('out/plot'),'B')
+
+            ppg.new_pipegraph(rc_gen(), quiet=True)
+            def calc2():
+                append('out/calc', 'A')
+                x = 5
+                return pydataframe.DataFrame({"X": range(0, 100), 'Y': range(50, 150)})
+            job = ppg.PlotJob(of, calc2, plot)
+            job.ignore_code_changes()
+            ppg.run_pipegraph()
+            self.assertTrue(magic(of).find('PNG image') != -1)
+            self.assertEqual(read('out/calc'),'A')
+
+            self.assertEqual(read('out/plot'),'B')
+        def test_plot_job_dependencies_are_added_to_just_the_cache_job(self):
+            import pydataframe
+
+            def calc():
+                return pydataframe.DataFrame({"X": range(0, 100), 'Y': range(50, 150)})
+            def plot(df):
+                return pyggplot.Plot(df).add_scatter('X','Y')
+            of = 'out/test.png'
+            job = ppg.PlotJob(of, calc, plot)
+            dep = ppg.FileGeneratingJob('out/A', lambda : write('out/A', 'A'))
+            job.depends_on(dep)
+            #self.assertTrue(dep in job.prerequisites)
+            self.assertTrue(dep in job.cache_job.prerequisites)
+
+        def test_raises_if_calc_returns_non_df(self):
+            #import pydataframe
+            def calc():
+                return None
+            def plot(df):
+                append('out/plot', 'B')
+                return pyggplot.Plot(df).add_scatter('X','Y')
+            of = 'out/test.png'
+            job = ppg.PlotJob(of, calc, plot)
+            try:
+                ppg.run_pipegraph()
+                raise ValueError("should not be reached")
+            except ppg.RuntimeError:
+                pass 
+            self.assertTrue(isinstance(job.cache_job.exception, ppg.JobContractError))
+
+        def test_raises_if_plot_returns_non_plot(self):
+            import pydataframe
+            #import pyggplot
+            def calc():
+                return pydataframe.DataFrame({"X": range(0, 100), 'Y': range(50, 150)})
+            def plot(df):
+                return None
+            of = 'out/test.png'
+            job = ppg.PlotJob(of, calc, plot)
+            try:
+                ppg.run_pipegraph()
+                raise ValueError("should not be reached")
+            except ppg.RuntimeError:
+                pass 
+            self.assertTrue(isinstance(job.exception, ppg.JobContractError))
+
+        def test_passing_non_function_for_calc(self):
+            def inner():
+                job = ppg.PlotJob('out/a', 'shu', lambda df: 1)
+            self.assertRaises(ValueError, inner)
+
+        def test_passing_non_function_for_plot(self):
+            def inner():
+                job = ppg.PlotJob('out/a', lambda: 55, 'shu')
+            self.assertRaises(ValueError, inner)
+
+        def test_passing_non_string_as_jobid(self):
+            def inner():
+                job = ppg.PlotJob(5, lambda: 1, lambda df: 34)
+            self.assertRaises(ValueError, inner)
 
 class CachedAttributeJobTests(PPGPerTest):
  
@@ -2670,21 +2752,6 @@ class TestingTheUnexpectedTests(PPGPerTest):
         self.assertEqual(read('out/Bs'), 'AA') #this one got rerun because we could not load the invariant...
 
 
-class HTMLDumpTests(PPGPerTest):
-
-    def test_html_dumping_on_failure(self):
-        fg = ppg.FileGeneratingJob('out/A', lambda: write('out/A', 'A'))
-        ppg.run_pipegraph()
-        self.assertTrue(os.path.exists('logs/pipegraph_status.html'))
-
-class UtilTests(unittest.TestCase):
-
-    def test_need_to_call_new_pipegraph_first(self):
-        ppg.util.global_pipegraph = None
-        def inner():
-            ppg.run_pipegraph()
-        self.assertRaises(ValueError, inner)
-
 
 class NotYetImplementedTests(unittest.TestCase):
 
@@ -2704,10 +2771,7 @@ class NotYetImplementedTests(unittest.TestCase):
         #now requires it, even if both C and E have already been done.
     
         #what a conundrum
-
-
-        pass
-
+        raise NotImplementedError()
 
 
 

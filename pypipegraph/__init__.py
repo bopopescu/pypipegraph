@@ -1,38 +1,58 @@
-from graph import run_pipegraph, new_pipegraph, forget_job_status, get_running_job_count , destroy_global_pipegraph
-from ppg_exceptions import RuntimeError, CycleError, JobContractError, PyPipelineGraphError, JobDiedException
-import twisted_fork
+from graph import (
+        run_pipegraph,
+        new_pipegraph,
+        forget_job_status,
+        destroy_global_pipegraph
+        )
+from ppg_exceptions import (
+        RuntimeError,
+        RuntimeException,
+        CycleError,
+        JobContractError,
+        PyPipeGraphError,
+        JobDiedException
+        )
+try:
+    import twisted_fork
+    twisted_available = True
+except ImportError:
+    pass
 import util
-import cloudpickle
 
 from job import (
-        Job, JobList,
-        FileGeneratingJob, MultiFileGeneratingJob, 
-        DataLoadingJob, AttributeLoadingJob, 
-        TempFileGeneratingJob, 
-        CachedAttributeLoadingJob, CachedDataLoadingJob,
-        PlotJob, CombinedPlotJob, 
-        FunctionInvariant, ParameterInvariant, FileTimeInvariant, FileChecksumInvariant,
-        JobGeneratingJob, DependencyInjectionJob, 
-        FinalJob
+    Job, JobList,
+    FileGeneratingJob, MultiFileGeneratingJob,
+    DataLoadingJob, AttributeLoadingJob,
+    TempFileGeneratingJob,
+    CachedAttributeLoadingJob, CachedDataLoadingJob,
+    PlotJob, CombinedPlotJob,
+        FunctionInvariant, ParameterInvariant,
+        FileTimeInvariant, FileChecksumInvariant,
+    JobGeneratingJob, DependencyInjectionJob,
+    FinalJob
         )
 
 assert_uniqueness_of_object = util.assert_uniqueness_of_object
 
 all = [
-        run_pipegraph, new_pipegraph, forget_job_status, get_running_job_count, destroy_global_pipegraph,
-         RuntimeError, CycleError, JobContractError, PyPipelineGraphError, JobDiedException,
+        run_pipegraph, new_pipegraph, forget_job_status,
+        destroy_global_pipegraph,
 
-         Job, JobList,
-        FileGeneratingJob, MultiFileGeneratingJob, 
-        DataLoadingJob, AttributeLoadingJob, 
-        TempFileGeneratingJob, 
+        RuntimeError, RuntimeException, CycleError, JobContractError,
+        PyPipeGraphError, JobDiedException,
+
+        Job, JobList,
+        FileGeneratingJob, MultiFileGeneratingJob,
+        DataLoadingJob, AttributeLoadingJob,
+        TempFileGeneratingJob,
         CachedAttributeLoadingJob, CachedDataLoadingJob,
         PlotJob, CombinedPlotJob,
-        FunctionInvariant, ParameterInvariant, FileTimeInvariant, FileChecksumInvariant,
+        FunctionInvariant, ParameterInvariant,
+        FileTimeInvariant, FileChecksumInvariant,
         JobGeneratingJob, DependencyInjectionJob,
         FinalJob,
 
-	util, twisted_fork, cloudpickle
-
-
+        util
         ]
+if twisted_available:
+    all.append(twisted_fork)
