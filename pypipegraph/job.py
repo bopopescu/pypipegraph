@@ -633,6 +633,9 @@ class FileChecksumInvariant(_InvariantJob):
             return filetime, filesize, chksum
 
     def checksum(self):
+        file_size = os.stat(self.job_id)[stat.ST_SIZE]
+        if file_size > 200 * 1024 * 1024:
+            print ('Taking md5 of large file', self.job_id)
         op = open(self.job_id, 'rb')
         res = hashlib.md5(op.read()).hexdigest()
         op.close()
@@ -726,7 +729,7 @@ class FileGeneratingJob(Job):
         else:
             filecheck = util.output_file_exists
         if not filecheck(self.job_id):
-            raise ppg_exceptions.JobContractError("%s did not create its file" % (self.job_id, ))
+            raise ppg_exceptions.JobContractError("%s did not create its file %s %s" % (self,self.callback.__code__.co_filename, self.callback.__code__.co_firstlineno) )
 
 
 class MultiFileGeneratingJob(FileGeneratingJob):
@@ -754,7 +757,7 @@ class MultiFileGeneratingJob(FileGeneratingJob):
             raise ValueError("function was not a callable")
         sorted_filenames = list(sorted(x for x in filenames))
         for x in sorted_filenames:
-            if not isinstance(x, str) and not isinstance(x, str): #FIXME
+            if not isinstance(x, str) and not isinstance(x, unicode): 
                 raise ValueError("Not all filenames passed to MultiFileGeneratingJob were str or unicode objects")
             if x in util.filename_collider_check and util.filename_collider_check[x] is not self:
                 raise ValueError("Two jobs generating the same file: %s %s - %s" % (self, util.filename_collider_check[x], x))
@@ -1729,3 +1732,55 @@ class MemMappedDataLoadingJob(DataLoadingJob):
             self.lfg.invalidated(reason)
         Job.invalidated(self, reason)
 
+def NotebookJob(notebook_filename, auto_detect_dependencies = True):
+    """Run an ipython notebook if it changed, or any of the jobs for filenames it references
+    changed"""
+    notebook_name = notebook_filename
+    if '/' in notebook_name:
+        notebook_name = notebook_name[notebook_name.rfind('/') + 1:]
+    if not os.path.exists('cache/notebooks'):
+        os.mkdir('cache/notebooks')
+    sentinel_file = os.path.join('cache','notebooks', hashlib.md5(notebook_filename).hexdigest() + ' ' + notebook_name +  '.html')
+    ipy_cache_file = os.path.join('cache','notebooks', hashlib.md5(notebook_filename).hexdigest() + '.ipynb')
+    return _NotebookJob([sentinel_file, ipy_cache_file], notebook_filename, auto_detect_dependencies)
+
+class _NotebookJob(MultiFileGeneratingJob):
+
+    def __init__(self, files, notebook_filename, auto_detect_dependencies):
+        sentinel_file, ipy_cache_file = files
+        def run_notebook():
+            import subprocess
+            shutil.copy(notebook_filename, ipy_cache_file)
+            p = subprocess.Popen(['runipy', '-o', os.path.abspath(ipy_cache_file), '--no-chdir'], cwd=os.path.abspath('.'), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            stdout, stderr = p.communicate()
+            if p.returncode != 0:
+                raise ValueError("Ipython notebook %s error return.\nstdout:\n%s\n\nstderr:\n%s" % (notebook_filename, stdout, stderr))
+            output_file = open(sentinel_file, 'wb')
+            p = subprocess.Popen(['ipython', 'nbconvert', os.path.abspath(ipy_cache_file), '--to', 'html', '--stdout'], stdout=output_file, stderr=subprocess.PIPE)
+            stdout, stderr = p.communicate()
+            if p.returncode != 0:
+                raise ValueError("Ipython nbconvert error. stderr: %s" % (stderr,))
+            output_file.close()
+        self.auto_detect_dependencies = auto_detect_dependencies
+        self.notebook_filename = notebook_filename
+        MultiFileGeneratingJob.__init__(self, files, run_notebook)
+
+    def inject_auto_invariants(self):
+       deps = [
+               FileChecksumInvariant(self.notebook_filename)
+               ]
+       if self.auto_detect_dependencies:
+           with open(self.notebook_filename, 'rb') as op:
+               raw_text = op.read()
+       for job_name, job  in  util.global_pipegraph.jobs.items():
+           if isinstance(job, MultiFileGeneratingJob):
+               for fn in job.filenames:
+                   if fn in raw_text:
+                       deps.append(job)
+           elif isinstance(job, FileGeneratingJob):
+                if job.job_id in raw_text:
+                       deps.append(job)
+
+
+
+ 
