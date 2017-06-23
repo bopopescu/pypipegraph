@@ -1351,19 +1351,19 @@ class PlotJob(FileGeneratingJob):
         self.render_args = render_args
         self._fiddle = None
 
-        import pydataframe
+        import pandas as pd
         import pyggplot
         if not self.skip_caching:
             self.cache_filename = os.path.join('cache', output_filename)
 
             def run_calc():
                 df = calc_function()
-                if not isinstance(df, pydataframe.DataFrame) and not str(df.__class__) == "<class 'pandas.core.frame.DataFrame'>":
+                if not isinstance(df, pd.DataFrame):
                     do_raise = True
                     if isinstance(df, dict):  # might be a list dfs...
                         do_raise = False
                         for x in df.values():
-                            if not isinstance(x, pydataframe.DataFrame) and not str(x.__class__) == "<class 'pandas.core.frame.DataFrame'>":
+                            if not isinstance(x, pd.DataFrame):
                                 do_raise = True
                                 break
                     if do_raise:
@@ -1399,20 +1399,19 @@ class PlotJob(FileGeneratingJob):
 
         if not skip_table:
             def dump_table():
+                import pandas as pd
                 df = self.get_data()
-                if isinstance(df, pydataframe.DataFrame):
-                    pydataframe.DF2TSV().write(df, self.table_filename)
-                elif str(df.__class__) == "<class 'pandas.core.frame.DataFrame'>":
+                if isinstance(df, pd.DataFrame):
                     df.to_csv(self.table_filename, sep="\t")
                 else:
+                    from pandas import ExcelWriter
+                    writer = pd.ExcelWriter(self.table_filename)
                     for key, dframe in df.items():
-                        if len(dframe) >= 65534:
-                            del df[key]
-                            key = key+'truncated'
-                            df[key] = dframe[0:65534, :]
-                        else:
-                            df[key] = dframe
-                    pydataframe.DF2Excel().write(df, self.table_filename)  # must have been a dict...
+                        dframe.to_excel(writer, key)
+                    writer = pd.ExcelWriter(self.table_filename)
+                    for key in df:
+                        df[key].to_excel(writer, key)
+                    writer.save()
             table_gen_job = FileGeneratingJob(self.table_filename, dump_table)
             if not self.skip_caching:
                 table_gen_job.depends_on(cache_job)
@@ -1503,9 +1502,9 @@ def CombinedPlotJob(output_filename, plot_jobs, facet_arguments, render_args=Non
         render_args = {'width': 10, 'height': 10}
 
     def plot():
-        import pydataframe
+        import pandas as pd
         import pyggplot
-        data = pydataframe.combine([plot_job.get_data() for plot_job in plot_jobs])
+        data = pd.concat([plot_job.get_data() for plot_job in plot_jobs], axis=0)
         plot = plot_jobs[0].plot_function(data)
         if isinstance(facet_arguments, list):
             if facet_arguments:  # empty lists mean no faceting
@@ -1532,6 +1531,7 @@ def CombinedPlotJob(output_filename, plot_jobs, facet_arguments, render_args=Non
         )))
     job.depends_on(FunctionInvariant(output_filename + '_fiddle', fiddle))
     job.depends_on([plot_job.cache_job for plot_job in plot_jobs])
+    job.depends_on(FunctionInvariant(output_filename + '_plot_combined', plot_jobs[0].plot_function))
     return job
 
 

@@ -51,7 +51,12 @@ logger = util.start_logging('graph')
 
 # earlier on, we had a different pickling scheme,
 # and that's what the files were called.
-invariant_status_filename_default = '.pypipegraph_status_robust'
+if os.path.exists('.pypipegraph_status_robust'):  # old projects keep their filename
+    invariant_status_filename_default = '.pypipegraph_status_robust'
+elif '/' in sys.argv[0]:  # no script name but an executable?
+    invariant_status_filename_default = '.pypipegraph_status_robust'
+else:
+    invariant_status_filename_default = '.ppg_status_%s' % sys.argv[0]  # script specific pipegraphs
 
 
 def run_pipegraph():
@@ -249,8 +254,11 @@ class Pipegraph(object):
                 preq.dependants.add(job)
 
         #inject final jobs to run after all others...
+        ii = 0
         for job in self.jobs.values():
             if job.is_final_job:
+                job.job_no = len(self.jobs) + ii + 123
+                ii += 1
                 for jobB in self.jobs.values():
                     non_final_dependands = [j for j in jobB.dependants if not j.is_final_job]
                     if not jobB.is_final_job and not non_final_dependands:
@@ -263,17 +271,14 @@ class Pipegraph(object):
             job.dependants = None
             job.prerequisites = None
 
-    def check_cycles(self):
-        """Check whether there are any loops in the graph which prevent execution.
-
-        Basically imposes a topological ordering, and if that's impossible, we have a cycle.
-        Also, this gives a valid, job by job order of executing them.
-        """
+    def apply_topological_order(self, list_of_jobs, add_job_numbers = False):
         for ii, job in enumerate(self.jobs.values()):
             job.dependants_copy = job.dependants.copy()
-            job.job_no = ii + 123
+            if add_job_numbers:
+                job.job_no = ii + 123
         L = []
-        S = [job for job in self.jobs.values() if len(job.dependants_copy) == 0]
+        S = [job for job in list_of_jobs if len(job.dependants_copy) == 0]
+        S.sort(key = lambda job: job.prio if hasattr(job, 'prio') else 0)
         while S:
             n = S.pop()
             L.append(n)
@@ -281,6 +286,15 @@ class Pipegraph(object):
                 m.dependants_copy.remove(n)
                 if not m.dependants_copy:
                     S.append(m)
+        return L
+
+    def check_cycles(self):
+        """Check whether there are any loops in the graph which prevent execution.
+
+        Basically imposes a topological ordering, and if that's impossible, we have a cycle.
+        Also, this gives a valid, job by job order of executing them.
+        """
+        L = self.apply_topological_order(self.jobs.values(), add_job_numbers=True)
         has_edges = False
         for job in self.jobs.values():
             if job.dependants_copy:
@@ -421,14 +435,14 @@ class Pipegraph(object):
                 self.invariant_status[job.job_id] = inv  # for now, it is the dependant job's job to clean up so they get reinvalidated if the executing is terminated before they are reubild (ie. filegenjobs delete their outputfiles)
 
     def build_todo_list(self):
-        """Go through each job. If it needs to be done, invalidate() all dependands.
+        """Go through each job. If it needs to be done, invalidate() all dependants.
         also requires all prerequisites to require_loading
         """
         needs_to_be_run = set()
         for job in self.jobs.values():
             job.do_cache = True
         for job in self.jobs.values():
-            if not job.is_done():  # is done can return True, False, and None ( = False, but even if is_temp_job, rerun dependands...)
+            if not job.is_done():  # is done can return True, False, and None ( = False, but even if is_temp_job, rerun dependants...)
                 #logger.info("Was not done: %s" % job)
                 if not job.is_loadable():
                     #logger.info("and is not loadable")
@@ -618,7 +632,11 @@ class Pipegraph(object):
                                             job.memory_needed < resources[slave]['physical_memory'] + resources[slave]['swap_memory'])
                                         ))):
                                 job.slave_name = slave
-                                self.slaves[slave].spawn(job)
+                                try:
+                                    self.slaves[slave].spawn(job)
+                                except Exception as e:
+                                    print ('failed to start', job)
+                                    raise
                                 logger.info("running_jobs added3 :%s" % job)
                                 self.running_jobs.add(job)
                                 to_remove.append(job)
@@ -692,7 +710,7 @@ class Pipegraph(object):
     def new_jobs_generated_during_runtime(self, new_jobs):
         """Received jobs from one of the job generating Jobs.
         We'll integrate them into the graph, and add them to the possible_execution_order.
-        Beauty of the job-singeltonization is that all dependands that are not new are caught..."""
+        Beauty of the job-singeltonization is that all dependants that are not new are caught..."""
         logger.info('new_jobs_generated_during_runtime')
 
         def check_preqs(job):
@@ -721,7 +739,7 @@ class Pipegraph(object):
         self.distribute_invariant_changes()
         if not self.do_dump_graph:
             self.dump_graph()
-        #we not only need to check the jobs we have received, we also need to check their dependands
+        #we not only need to check the jobs we have received, we also need to check their dependants
         #for example there might have been a DependencyInjectionJob than injected a DataLoadingJob
         #that had it's invariant FunctionInvariant changed...
         jobs_to_check = set(new_jobs.values())
@@ -800,7 +818,8 @@ class Pipegraph(object):
             #self._write_xgmml("logs/ppg_graph.xgmml", nodes, edges)
             self._write_gml("logs/ppg_graph.gml", nodes, edges)
         if os.path.exists('logs') and os.path.isdir('logs'):
-            if os.fork() == 0:  # run this in an unrelated child process
+            pid = os.fork()
+            if pid == 0:  # run this in an unrelated child process
                 if 'PYPIPEGRAPH_DO_COVERAGE' in os.environ:
                     import coverage
                     cov = coverage.coverage(data_suffix=True, config_file = os.environ['PYPIPEGRAPH_DO_COVERAGE'])
@@ -815,6 +834,7 @@ class Pipegraph(object):
                     do_dump()
                 #raise ValueError("Dump Exit")
                 os._exit(0)  # Cleanup is for parent processes!
+            self.dump_pid = pid
 
     def _write_xgmml(self, output_filename, node_to_attribute_dict, edges):
         from xml.sax.saxutils import escape
@@ -911,9 +931,22 @@ class Pipegraph(object):
                 count += 1
         return count
 
+    def prioritize(self, job):
+        p = self.possible_execution_order[:]
+        if not job in p:
+            raise ValueError("Job not in execution order")
+        for job in p:
+            job.prio = 0
+        def recurse(j):
+            j.prio = -1
+            for jp in j.prerequisites:
+                recurse(jp)
+        recurse(job)
+        self.possible_execution_order = self.apply_topological_order(p)[::-1]
+        return
 
     def signal_finished(self):
         """If there's a .pipegraph_finished.py in ~, call it"""
         fn = os.path.expanduser("~/.pipegraph_finished.py")
-        if os.path.exists(fn):
+        if os.path.exists(fn) and os.access(fn, os.X_OK) :
             os.system(fn)

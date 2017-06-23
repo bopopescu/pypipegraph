@@ -238,6 +238,68 @@ class CycleTests(unittest.TestCase):
             ppg.run_pipegraph()
         self.assertRaises(ppg.CycleError, inner)
 
+    def test_prioritize_simple(self):
+        jobA = ppg.Job('A')
+        jobB = ppg.Job('B')
+        jobA.depends_on(jobB)
+        jobC = ppg.Job('C')
+        jobD = ppg.Job('D')
+        jobC.depends_on(jobD)
+        ppg.util.global_pipegraph.connect_graph()
+        ppg.util.global_pipegraph.check_cycles()
+        self.assertTrue(jobD in ppg.util.global_pipegraph.possible_execution_order)
+        self.assertFalse(jobD == ppg.util.global_pipegraph.possible_execution_order[0])
+        print('before')
+        for x in ppg.util.global_pipegraph.possible_execution_order:
+            print(x.job_id)
+        print('after')
+
+        ppg.util.global_pipegraph.prioritize(jobD)
+        for x in ppg.util.global_pipegraph.possible_execution_order:
+            print(x.job_id)
+
+        self.assertTrue(jobD == ppg.util.global_pipegraph.possible_execution_order[0])
+
+        ppg.util.global_pipegraph.prioritize(jobB)
+        self.assertTrue(jobB == ppg.util.global_pipegraph.possible_execution_order[0])
+        self.assertTrue(ppg.util.global_pipegraph.possible_execution_order.index(jobA) > ppg.util.global_pipegraph.possible_execution_order.index(jobB))
+        ppg.util.global_pipegraph.prioritize(jobC)
+        print("after prio c")
+        for x in ppg.util.global_pipegraph.possible_execution_order:
+            print(x.job_id)
+
+        self.assertTrue(ppg.util.global_pipegraph.possible_execution_order.index(jobA) > ppg.util.global_pipegraph.possible_execution_order.index(jobB))
+        self.assertTrue(ppg.util.global_pipegraph.possible_execution_order.index(jobC) > ppg.util.global_pipegraph.possible_execution_order.index(jobD))
+
+        
+        self.assertTrue(jobD == ppg.util.global_pipegraph.possible_execution_order[0])
+        self.assertTrue(jobC == ppg.util.global_pipegraph.possible_execution_order[1])
+
+        ppg.util.global_pipegraph.prioritize(jobB)
+        self.assertTrue(jobB == ppg.util.global_pipegraph.possible_execution_order[0])
+        self.assertTrue(ppg.util.global_pipegraph.possible_execution_order.index(jobA) > ppg.util.global_pipegraph.possible_execution_order.index(jobB))
+
+    def test_prioritize_raises_on_done_job(self):
+        def dump():
+            pass
+        jobA = ppg.FileGeneratingJob('out/A', dump)
+        jobB = ppg.FileGeneratingJob('out/B', dump)
+        jobB.ignore_code_changes()
+        with open("out/B", 'wb') as op:
+           op.write("Done")
+        ppg.util.global_pipegraph.connect_graph()
+        ppg.util.global_pipegraph.check_cycles()
+        ppg.util.global_pipegraph.load_invariant_status()
+        ppg.util.global_pipegraph.distribute_invariant_changes()
+        ppg.util.global_pipegraph.dump_invariant_status() # the jobs will have removed their output, so we can safely store the invariant data
+        ppg.util.global_pipegraph.build_todo_list()
+        def inner():
+            ppg.util.global_pipegraph.prioritize(jobB)
+        self.assertRaises(ValueError, inner)
+
+
+
+         
 
 class JobTests(unittest.TestCase):
     def setUp(self):
@@ -592,7 +654,10 @@ class FileGeneratingJobTests(PPGPerTest):
         ppg.new_pipegraph(quiet=True, invariant_status_filename = 'shu.dat', dump_graph=True)
         jobA = ppg.FileGeneratingJob('out/A', lambda: write('out/A','A'))
         ppg.run_pipegraph()
-        self.assertTrue(os.path.exists('logs/ppg_graph.xgmml'))
+        pid = ppg.util.global_pipegraph.dump_pid
+        os.waitpid(pid, 0)
+        print os.listdir('logs')
+        self.assertTrue(os.path.exists('logs/ppg_graph.gml'))
             
 
 class MultiFileGeneratingJobTests(PPGPerTest):
@@ -3177,10 +3242,10 @@ class TestingTheUnexpectedTests(PPGPerTest):
     def testing_import_does_not_hang(self):  # see python issue22853 
         old_dir = os.getcwd()
         os.chdir(os.path.dirname(__file__))
-        p = subprocess.Popen(['python', '_import_does_not_hang.py'], stderr = subprocess.PIPE)
+        p = subprocess.Popen(['python', '_import_does_not_hang.py'], stdout = subprocess.PIPE, stderr = subprocess.PIPE)
         stdout, stderr = p.communicate()
         print stdout, stderr
-        self.assertTrue('OK' in stderr)
+        self.assertTrue('OK' in stdout)
         os.chdir(old_dir)
 
 
