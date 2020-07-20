@@ -212,7 +212,7 @@ class Job(object):
             self.stderr = None
             self.exception = None
             self.was_run = False
-            self.was_done_on = set()  # on which slave(s) was this job run?
+            self.was_done_on = set()  # on which subordinate(s) was this job run?
             self.was_loaded = False
             self.was_invalidated = False
             self.invalidation_count = (
@@ -408,8 +408,8 @@ class Job(object):
             "Called load() on a j'ob that had is_loadable, but did not overwrite load() as it should"
         )
 
-    def runs_in_slave(self):
-        """Is this a job that runs in our slave, ie. in a spawned job"""
+    def runs_in_subordinate(self):
+        """Is this a job that runs in our subordinate, ie. in a spawned job"""
         return True
 
     def modifies_jobgraph(self):
@@ -553,7 +553,7 @@ class _InvariantJob(Job):
     def depends_on(self, *job_joblist_or_list_of_jobs):
         raise ppg_exceptions.JobContractError("Invariants can't have dependencies")
 
-    def runs_in_slave(self):
+    def runs_in_subordinate(self):
         return False
 
 
@@ -1391,7 +1391,7 @@ class MultiFileGeneratingJob(FileGeneratingJob):
                 % (self.job_id, "\n".join([str(x) for x in missing_files]))
             )
 
-    def runs_in_slave(self):
+    def runs_in_subordinate(self):
         return True
 
 
@@ -1417,7 +1417,7 @@ class TempFileGeneratingJob(FileGeneratingJob):
         except (OSError, IOError):  # pragma: no cover
             pass
 
-    def runs_in_slave(self):
+    def runs_in_subordinate(self):
         return True
 
     def calc_is_done(self, depth=0):
@@ -1503,7 +1503,7 @@ class TempFilePlusGeneratingJob(TempFileGeneratingJob):
 
 
 class DataLoadingJob(Job):
-    """Modify the current (system local) master process with a callback function.
+    """Modify the current (system local) main process with a callback function.
     No cleanup is performed - use AttributeLoadingJob if you want your data to be unloaded"""
 
     def __init__(self, job_id, callback):
@@ -1566,7 +1566,7 @@ class DataLoadingJob(Job):
 
 
 class AttributeLoadingJob(DataLoadingJob):
-    """Modify the current master process by loading the return value of a callback
+    """Modify the current main process by loading the return value of a callback
     into an object attribute.
 
     On cleanup, the attribute is deleted via del
